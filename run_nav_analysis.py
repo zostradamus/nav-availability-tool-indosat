@@ -127,8 +127,22 @@ def process_week(week, path, kel):
     need = {"SITEID", "sitenname", "MC Cluster", "New_Region", "Long", "Lat",
             "Kecamatan", "Kabupaten_Kota"}
 
+    _xf = pd.ExcelFile(path, engine="pyxlsb")
+    _names = _xf.sheet_names
+
+    def _resolve(token):
+        for n in _names:  # persis (abaikan kapital/spasi)
+            if n.strip().upper() == token.upper():
+                return n
+        for n in _names:  # mengandung token, mis. "NAV 2G"
+            if token.upper() in n.upper():
+                return n
+        raise ValueError(f"sheet '{token}' tidak ada di "
+                         f"{os.path.basename(path)}; sheet tersedia: {_names}")
+
     def read_sheet(sheet, navpat, trafpat):
-        d = pd.read_excel(path, sheet_name=sheet, engine="pyxlsb",
+        sheet = _resolve(sheet)
+        d = pd.read_excel(_xf, sheet_name=sheet,
                           usecols=lambda c: c in need or
                           (isinstance(c, str) and
                            (re.match(navpat, c) or re.match(trafpat, c))))
@@ -597,7 +611,12 @@ def main():
             kel = KelurahanLookup()
             for wk, path, sig in todo:
                 t0 = time.time()
-                df = process_week(wk, path, kel)
+                try:
+                    df = process_week(wk, path, kel)
+                except Exception as e:
+                    print(f"ERROR {wk} ({os.path.basename(path)}): {e} "
+                          f"-- minggu ini dilewati")
+                    continue
                 df.to_parquet(os.path.join(CACHE, f"week_{wk}.parquet"),
                               index=False)
                 state[wk] = sig
