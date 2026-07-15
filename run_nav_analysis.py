@@ -237,6 +237,31 @@ def merge_cmdb(df):
     df.loc[df["SITEID_CM"].isna(), cm_cols] = "NOT_IN_CMDB"
     return df.drop(columns=["_sid", "SITEID_CM"])
 
+def _copy_out(src_file, base):
+    """Salin hasil ke semua folder copy_to; jika file tujuan terkunci
+    (dibuka user lain / lock OneDrive), coba ulang lalu simpan sebagai *_new."""
+    import shutil
+    stem, ext = os.path.splitext(base)
+    for dest in COPY_TO:
+        try:
+            os.makedirs(dest, exist_ok=True)
+            target = os.path.join(dest, base)
+            try:
+                shutil.copy2(src_file, target)
+            except PermissionError:
+                time.sleep(3)
+                try:
+                    shutil.copy2(src_file, target)
+                except PermissionError:
+                    alt = os.path.join(dest, stem + "_new" + ext)
+                    shutil.copy2(src_file, alt)
+                    print(f"WARNING: {base} terkunci di {dest}, "
+                          f"disimpan sebagai {os.path.basename(alt)}")
+                    continue
+            print(f"copied to: {target}")
+        except Exception as e:
+            print(f"WARNING: gagal copy ke {dest}: {e}")
+
 def categorize(v):
     if v >= 1.0 - 1e-9:
         return "1. Availability 100%"
@@ -483,14 +508,7 @@ def build_excel():
               "disimpan sebagai *_new.xlsx")
     print(f"Excel saved: {out} | latest={latest} | weeks={len(wkeys)} "
           f"| sites={len(df)}")
-    import shutil
-    for dest in COPY_TO:
-        try:
-            os.makedirs(dest, exist_ok=True)
-            shutil.copy2(out, os.path.join(dest, os.path.basename(OUT_XLSX)))
-            print(f"copied to: {dest}")
-        except Exception as e:
-            print(f"WARNING: gagal copy ke {dest}: {e}")
+    _copy_out(out, os.path.basename(OUT_XLSX))
 
 def build_dashboard():
     import pandas as pd
@@ -570,13 +588,7 @@ def build_dashboard():
         with open(out, "w", encoding="utf-8") as f:
             f.write(html)
     print(f"Dashboard saved: {out} ({len(html)//1024} KB)")
-    import shutil
-    for dest in COPY_TO:
-        try:
-            os.makedirs(dest, exist_ok=True)
-            shutil.copy2(out, os.path.join(dest, os.path.basename(DASH_OUT)))
-        except Exception as e:
-            print(f"WARNING: gagal copy dashboard ke {dest}: {e}")
+    _copy_out(out, os.path.basename(DASH_OUT))
 
 def main():
     ap = argparse.ArgumentParser()
