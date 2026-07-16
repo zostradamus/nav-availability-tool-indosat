@@ -267,6 +267,85 @@ def process_rca(path):
     out.to_parquet(os.path.join(CACHE, "rca.parquet"), index=False)
     return out
 
+def process_daily(path):
+    """Minggu berjalan: rata-rata availability harian per site dari file
+    NAV CJ (sheet 2G & 4G, baris per site per hari) untuk minggu terbesar
+    di file. Dipakai dashboard sampai file mingguan resminya terbit."""
+    import pandas as pd
+    from datetime import date, timedelta
+    eng = "pyxlsb" if path.lower().endswith(".xlsb") else None
+    xf = pd.ExcelFile(path, engine=eng)
+
+    def daily_avg(token):
+        sheet = next((n for n in xf.sheet_names
+                      if n.strip().upper() == token.upper()), None)
+        if sheet is None:
+            return None, None, None
+        probe = pd.read_excel(xf, sheet_name=sheet, header=None, nrows=5)
+        hdr = 0
+        for i in range(len(probe)):
+            cells = [str(x).strip().upper() for x in probe.iloc[i].tolist()]
+            if "SITE ID" in cells:
+                hdr = i
+                break
+        d = pd.read_excel(xf, sheet_name=sheet, header=hdr)
+        d.columns = [str(c).strip() for c in d.columns]
+        low = {c.lower(): c for c in d.columns}
+        cs, cw = low.get("site id"), low.get("week")
+        cd_, ca = low.get("date"), low.get("avability") or low.get("availability")
+        if not all([cs, cw, cd_, ca]):
+            return None, None, None
+        for c in (cw, cd_, ca):
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+        wk = int(d[cw].max())
+        d = d[d[cw] == wk]
+        agg = d.groupby(d[cs].astype(str).str.strip().str.upper())[ca].mean()
+        return agg, wk, d[cd_].max()
+
+    a2, wk2, dt2 = daily_avg("2G")
+    a4, wk4, dt4 = daily_avg("4G")
+    if a2 is None and a4 is None:
+        return None
+    wk = max(w for w in (wk2, wk4) if w is not None)
+    if wk2 == wk and a2 is not None:
+        base = a2.to_frame("Avail_Avg")
+    else:
+        base = pd.DataFrame(columns=["Avail_Avg"])
+    if a4 is not None and wk4 == wk:
+        base = base.join(a4.to_frame("Avail_4G"), how="outer")
+    else:
+        base["Avail_4G"] = None
+    base.index.name = "SITEID"
+    base = base.reset_index()
+    # meta lokasi diambil dari minggu resmi terakhir
+    wfiles = sorted(glob.glob(os.path.join(CACHE, "week_*.parquet")))
+    if wfiles:
+        last = pd.read_parquet(wfiles[-1], columns=[
+            "SITEID", "Site_Name", "MC Cluster", "Kelurahan",
+            "Kode_Kelurahan", "Kecamatan", "Kabupaten"])
+        base = base.merge(last, on="SITEID", how="left")
+    else:
+        for c in ["Site_Name", "MC Cluster", "Kelurahan", "Kode_Kelurahan",
+                  "Kecamatan", "Kabupaten"]:
+            base[c] = ""
+    year = "2026"
+    if wfiles:
+        year = os.path.basename(wfiles[-1])[5:9]
+    serial = max(x for x in (dt2, dt4) if x is not None)
+    tgl = (date(1899, 12, 30) + timedelta(days=int(serial))).strftime("%Y%m%d")
+    base["Week"] = f"{year}_W{wk:02d}"
+    base["Week_Date"] = tgl
+    base["Traffic_2G_MB"] = None
+    base["Traffic_4G_MB"] = None
+    base["In_2G_Sheet"] = base["Avail_Avg"].notna()
+    cols = ["Week", "Week_Date", "SITEID", "Site_Name", "MC Cluster",
+            "Kelurahan", "Kode_Kelurahan", "Kecamatan", "Kabupaten",
+            "Avail_Avg", "Avail_4G", "Traffic_2G_MB", "Traffic_4G_MB",
+            "In_2G_Sheet"]
+    base = base[cols]
+    base.to_parquet(os.path.join(CACHE, "running.parquet"), index=False)
+    return base
+
 def find_cmdb_file():
     best = None
     for f in glob.glob(os.path.join(CMDB_DIR, "*.xlsx")):
@@ -576,6 +655,12 @@ def build_dashboard():
     for f in files:
         w = pd.read_parquet(f)
         weeks[w["Week"].iloc[0]] = w
+    runp = os.path.join(CACHE, "running.parquet")
+    if os.path.exists(runp):
+        rw = pd.read_parquet(runp)
+        rbase = rw["Week"].iloc[0]
+        if rbase not in weeks and (not weeks or rbase > max(weeks)):
+            weeks[rbase + "*"] = rw
     wkeys = sorted(weeks)
     wdates = [str(weeks[k]["Week_Date"].iloc[0]) if "Week_Date" in weeks[k]
               else "20260101" for k in wkeys]
@@ -689,6 +774,11 @@ def main():
                     save_json(STATE_F, state)
                     print(f"processed RCA: {os.path.basename(rca_f)} "
                           f"({len(r)} site dengan sub cause)")
+                rw = process_daily(rca_f)
+                if rw is not None:
+                    print(f"processed minggu berjalan: {rw['Week'].iloc[0]} "
+                          f"({len(rw)} site, data harian s/d "
+                          f"{rw['Week_Date'].iloc[0]})")
         week_files = find_week_files()
         todo = []
         for wk, path in week_files.items():
