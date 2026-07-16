@@ -73,6 +73,7 @@ canvas{max-height:300px;}
   <label>Teknologi</label><select id="fTech"><option value="2g">2G</option><option value="4g">4G</option><option value="both">2G + 4G (traffic)</option></select>
   <label>Kategori</label><select id="fCat"><option value="all">Semua</option><option value="0">99% - 100%</option><option value="1">&lt;99%</option><option value="x">Tanpa data</option></select>
   <label>Kabupaten</label><select id="fKab"><option value="all">Semua</option></select>
+  <label>RTS</label><select id="fRts"><option value="all">Semua</option></select>
   <label>Cari</label><input id="fQ" placeholder="site / kecamatan / kelurahan / RTS...">
 </div>
 <main id="content"></main>
@@ -83,7 +84,7 @@ const CATL=["99% - 100%","<99%"], W=P.weeks, S=P.sites;
 const F={SID:0,NAME:1,KEL:2,KEC:3,KAB:4,MC:5,TYPE:6,TRAN:7,PRIO:8,OWN:9,GEN:10,RTS:11,RCA:12};
 const MON={};W.forEach((w,i)=>{const d=P.week_dates[i];const m=d.slice(0,4)+"-"+d.slice(4,6);(MON[m]=MON[m]||[]).push(w);});
 let tab="overview", sortK=null, sortD=1, page=0; const PSZ=100;
-const st={week:W[W.length-1],tech:"2g",cat:"all",kab:"all",q:""};
+const st={week:W[W.length-1],tech:"2g",cat:"all",kab:"all",rts:"all",q:""};
 const $=id=>document.getElementById(id);
 function av(w,i){const r=P.data[w][i];return st.tech==="4g"?r[1]:r[0];}
 function av2(w,i){return P.data[w][i][0];} function av4(w,i){return P.data[w][i][1];}
@@ -98,6 +99,7 @@ function pass(i){
   const v=av(st.week,i);
   if(st.cat!=="all"){const c=cat(v);if(String(c)!==st.cat)return false;}
   if(st.kab!=="all"&&S[i][F.KAB]!==st.kab)return false;
+  if(st.rts!=="all"&&(S[i][F.RTS]||"(tanpa RTS)")!==st.rts)return false;
   if(st.q){const q=st.q.toLowerCase();const s=S[i];
     if(!(s[F.SID]+" "+s[F.NAME]+" "+s[F.KEC]+" "+s[F.KEL]+" "+(s[F.RTS]||"")).toLowerCase().includes(q))return false;}
   return true;}
@@ -108,10 +110,12 @@ function init(){
   const fw=$("fWeek");W.forEach(w=>{const o=document.createElement("option");o.value=w;o.textContent=fmtW(w);fw.appendChild(o);});
   fw.value=st.week;
   [...new Set(S.map(s=>s[F.KAB]).filter(Boolean))].sort().forEach(k=>{const o=document.createElement("option");o.value=k;o.textContent=k;$("fKab").appendChild(o);});
+  [...new Set(S.map(s=>s[F.RTS]||"(tanpa RTS)"))].sort().forEach(k=>{const o=document.createElement("option");o.value=k;o.textContent=k;$("fRts").appendChild(o);});
   fw.onchange=e=>{st.week=e.target.value;page=0;render();};
   $("fTech").onchange=e=>{st.tech=e.target.value;page=0;render();};
   $("fCat").onchange=e=>{st.cat=e.target.value;page=0;render();};
   $("fKab").onchange=e=>{st.kab=e.target.value;page=0;render();};
+  $("fRts").onchange=e=>{st.rts=e.target.value;page=0;render();};
   $("fQ").oninput=e=>{st.q=e.target.value;page=0;render();};
   document.querySelectorAll(".tab").forEach(b=>b.onclick=()=>{tab=b.dataset.t;
     document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x===b));page=0;sortK=null;render();});
@@ -198,10 +202,15 @@ function rRts(el){
   let h='<div class="panel"><h3>Rekap per RTS Name &mdash; '+fmtW(st.week)+' ('+(st.tech==="both"?"2G":st.tech.toUpperCase())+')</h3>'
   +'<table><thead><tr><th data-k="rts">RTS Name</th><th data-k="sites">Site</th><th data-k="avg">Avg Avail</th>'
   +'<th data-k="c100">99-100%</th><th data-k="cbad">&lt;99%</th><th data-k="nd">No data</th><th data-k="traf">Traffic</th></tr></thead><tbody>';
-  rows.forEach((r,ri)=>{h+='<tr><td class="clk" onclick="rtsDetail('+ri+')">'+r.rts+'</td><td>'+r.sites+'</td>'
+  rows.forEach((r,ri)=>{h+='<tr><td class="clk" onclick="filterRts('+ri+')">'+r.rts+'</td><td>'+r.sites+'</td>'
     +'<td class="'+pcCls(r.avg)+'">'+pc(r.avg)+'</td><td>'+r.c100+'</td><td>'+(r.cbad?'<b style="color:var(--red)">'+r.cbad+'</b>':0)+'</td><td>'+r.nd+'</td><td>'+gb(r.traf)+'</td></tr>';});
-  h+='</tbody></table><div class="note">Klik nama RTS untuk melihat semua site tanggung jawabnya (default urut dari yang paling banyak site &lt;99%). Kotak Cari di atas juga bisa dipakai untuk nama RTS.</div></div>';
+  h+='</tbody></table><div class="note">Klik nama RTS &rarr; Site Explorer otomatis terfilter ke RTS itu (kombinasikan dengan filter Kategori &lt;99% untuk mengulik site bermasalahnya saja).</div></div>';
   el.innerHTML=h;window._rtsRows=rows;bindSort(el,()=>rRts(el));}
+function filterRts(ri){
+  const r=window._rtsRows[ri];
+  st.rts=r.rts;$("fRts").value=r.rts;
+  tab="sites";document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.dataset.t==="sites"));
+  page=0;sortK=null;render();}
 function rtsDetail(ri){
   const r=window._rtsRows[ri];
   let h='<button class="close" onclick="document.getElementById(\'modal\').style.display=\'none\'">&times;</button>'
@@ -299,6 +308,7 @@ function rMonthly(el){
   const wks=MON[sel];
   const bad=[];
   for(let i=0;i<S.length;i++){if(st.kab!=="all"&&S[i][F.KAB]!==st.kab)continue;
+    if(st.rts!=="all"&&(S[i][F.RTS]||"(tanpa RTS)")!==st.rts)continue;
     let all=true,any=false,sum=0,n=0;
     for(const w of wks){const v=st.tech==="4g"?P.data[w][i][1]:P.data[w][i][0];
       if(v==null){continue;}any=true;sum+=v;n++;if(v>=0.99)all=false;}
@@ -326,6 +336,7 @@ function rCompare(el){
   const A=g(wa),B=g(wb);
   const dif=[];
   for(let i=0;i<S.length;i++){if(st.kab!=="all"&&S[i][F.KAB]!==st.kab)continue;
+    if(st.rts!=="all"&&(S[i][F.RTS]||"(tanpa RTS)")!==st.rts)continue;
     const x=st.tech==="4g"?P.data[wa][i][1]:P.data[wa][i][0];
     const y=st.tech==="4g"?P.data[wb][i][1]:P.data[wb][i][0];
     if(x==null||y==null)continue;dif.push([i,y-x,x,y]);}
