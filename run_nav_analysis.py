@@ -58,7 +58,8 @@ BOUND_PKL = os.path.join(REF, "kelurahan_boundaries_33_34.pkl")
 def ensure_deps():
     for mod, pkg in [("pyxlsb", "pyxlsb"), ("shapely", "shapely"),
                      ("openpyxl", "openpyxl"), ("pandas", "pandas"),
-                     ("pyarrow", "pyarrow")]:
+                     ("pyarrow", "pyarrow"),
+                     ("python_calamine", "python-calamine")]:
         try:
             __import__(mod)
         except ImportError:
@@ -209,7 +210,143 @@ CMDB_COLS = {"Site ID*": "SITEID_CM", "Site Type Label": "Site_Type",
 def find_rca_file():
     files = glob.glob(os.path.join(RCA_DIR, "*.xlsb")) + \
             glob.glob(os.path.join(RCA_DIR, "*.xlsx"))
-    return max(files, key=os.path.getmtime) if files else None
+    if not files:
+        return None
+    weekly = []
+    for f in files:
+        m = re.search(r"week\s*(\d+)", os.path.basename(f), re.I)
+        if m:
+            weekly.append((int(m.group(1)), os.path.getmtime(f), f))
+    if weekly:  # file mingguan dgn nomor terbesar (lalu paling baru)
+        return max(weekly)[2]
+    return max(files, key=os.path.getmtime)
+
+def find_yearly_file():
+    for f in glob.glob(os.path.join(RCA_DIR, "*.xlsb")) + \
+             glob.glob(os.path.join(RCA_DIR, "*.xlsx")):
+        if re.search(r"year", os.path.basename(f), re.I):
+            return f
+    return None
+
+def process_yearly(path):
+    """Backfill riwayat: baca file Yearly (sheet 2G/4G + lanjutan 2G-2/4G-2,
+    baris per site per hari), rata-rata per minggu per site, tulis parquet
+    minggu untuk minggu yang BELUM punya data resmi mingguan."""
+    import pandas as pd
+    from pyxlsb import open_workbook
+    from datetime import date, timedelta
+    agg, wk_date = {}, {}
+    try:
+        from python_calamine import CalamineWorkbook
+        cw = CalamineWorkbook.from_path(path)
+        sheets = {n.strip().upper(): n for n in cw.sheet_names}
+        def iter_sheet(tok):
+            n = sheets.get(tok.upper())
+            if n is None:
+                return
+            for row in cw.get_sheet_by_name(n).to_python(
+                    skip_empty_area=True):
+                yield row
+    except ImportError:
+        cw = None
+        wb = open_workbook(path)
+        sheets = {n.strip().upper(): n for n in wb.sheets}
+        def iter_sheet(tok):
+            n = sheets.get(tok.upper())
+            if n is None:
+                return
+            with wb.get_sheet(n) as sh:
+                for row in sh.rows():
+                    yield [c.v for c in row]
+    from datetime import datetime as _dt, date as _date
+    for tech, tokens in (("2G", ("2G", "2G-2")), ("4G", ("4G", "4G-2"))):
+        for tok in tokens:
+            idx = None
+            for v in iter_sheet(tok):
+                if idx is None:
+                    up = [str(x).strip().upper() if x is not None else ""
+                          for x in v]
+                    if "SITE ID" in up:
+                        ia = (up.index("AVABILITY") if "AVABILITY" in up
+                              else up.index("AVAILABILITY"))
+                        idx = (up.index("DATE"), up.index("WEEK"),
+                               up.index("SITE ID"), ia)
+                    continue
+                try:
+                    d_, w_, s_, a_ = (v[idx[0]], v[idx[1]],
+                                      v[idx[2]], v[idx[3]])
+                except IndexError:
+                    continue
+                if w_ in (None, "") or s_ in (None, "") or a_ in (None, ""):
+                    continue
+                try:
+                    wnum = int(float(w_)); aval = float(a_)
+                except (TypeError, ValueError):
+                    continue
+                key = (tech, wnum, str(s_).strip().upper())
+                r = agg.get(key)
+                if r is None:
+                    agg[key] = [aval, 1]
+                else:
+                    r[0] += aval; r[1] += 1
+                if d_ not in (None, ""):
+                    if isinstance(d_, (_dt, _date)):  # calamine beri datetime
+                        d_ = (d_.date() if isinstance(d_, _dt) else d_
+                              ).toordinal() - _date(1899, 12, 30).toordinal()
+                    try:
+                        d_ = float(d_)
+                    except (TypeError, ValueError):
+                        continue
+                    cur = wk_date.get(wnum)
+                    if cur is None or d_ < cur:
+                        wk_date[wnum] = d_
+    if not agg:
+        return []
+    m = re.search(r"(20\d\d)", os.path.basename(path))
+    year = m.group(1) if m else "2026"
+    have = {os.path.basename(f)[5:-8]
+            for f in glob.glob(os.path.join(CACHE, "week_*.parquet"))}
+    meta = None
+    wfiles = sorted(glob.glob(os.path.join(CACHE, "week_*.parquet")))
+    if wfiles:
+        meta = pd.read_parquet(wfiles[-1], columns=[
+            "SITEID", "Site_Name", "MC Cluster", "Kelurahan",
+            "Kode_Kelurahan", "Kecamatan", "Kabupaten"])
+    written = []
+    for wk in sorted({k[1] for k in agg}):
+        wkey = f"{year}_W{wk:02d}"
+        if wkey in have:
+            continue
+        sids = sorted({k[2] for k in agg if k[1] == wk})
+        rows = []
+        for s in sids:
+            a2 = agg.get(("2G", wk, s))
+            a4 = agg.get(("4G", wk, s))
+            rows.append((s, a2[0] / a2[1] if a2 else None,
+                         a4[0] / a4[1] if a4 else None))
+        df = pd.DataFrame(rows, columns=["SITEID", "Avail_Avg", "Avail_4G"])
+        if meta is not None:
+            df = df.merge(meta, on="SITEID", how="left")
+        else:
+            for c in ["Site_Name", "MC Cluster", "Kelurahan",
+                      "Kode_Kelurahan", "Kecamatan", "Kabupaten"]:
+                df[c] = ""
+        serial = wk_date.get(wk)
+        tgl = ((date(1899, 12, 30) + timedelta(days=int(serial)))
+               .strftime("%Y%m%d") if serial else f"{year}0101")
+        df["Week"] = wkey
+        df["Week_Date"] = tgl
+        df["Traffic_2G_MB"] = None
+        df["Traffic_4G_MB"] = None
+        df["In_2G_Sheet"] = df["Avail_Avg"].notna()
+        df = df[["Week", "Week_Date", "SITEID", "Site_Name", "MC Cluster",
+                 "Kelurahan", "Kode_Kelurahan", "Kecamatan", "Kabupaten",
+                 "Avail_Avg", "Avail_4G", "Traffic_2G_MB", "Traffic_4G_MB",
+                 "In_2G_Sheet"]]
+        df.to_parquet(os.path.join(CACHE, f"week_{wkey}.parquet"),
+                      index=False)
+        written.append(wkey)
+    return written
 
 def process_rca(path):
     import pandas as pd
@@ -779,6 +916,18 @@ def main():
                     print(f"processed minggu berjalan: {rw['Week'].iloc[0]} "
                           f"({len(rw)} site, data harian s/d "
                           f"{rw['Week_Date'].iloc[0]})")
+        yr_f = find_yearly_file()
+        if yr_f:
+            sig = f"{os.path.basename(yr_f)}_{os.path.getmtime(yr_f)}_" \
+                  f"{os.path.getsize(yr_f)}"
+            if args.force or state.get("__yearly__") != sig:
+                print(f"processing Yearly backfill: {os.path.basename(yr_f)} "
+                      f"(bisa beberapa menit)...")
+                yw = process_yearly(yr_f)
+                state["__yearly__"] = sig
+                save_json(STATE_F, state)
+                print(f"processed Yearly: +{len(yw)} minggu "
+                      f"({', '.join(yw) if yw else 'tidak ada minggu baru'})")
         week_files = find_week_files()
         todo = []
         for wk, path in week_files.items():
